@@ -1,0 +1,11 @@
+#docker build -t httpsmallcacheserver .
+#docker run -p 5141:5000 httpsmallcacheserver
+services:
+  httpsmallcacheserver:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "5141:5000"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
