@@ -48,6 +48,29 @@ docker run -d -p 5000:5000 httpsmallcacheserver
 ```
 The application will be accessible at `http://localhost:5000`.
 
+## Run published image:
+
+You can use Docker Compose to run the published image. Create a `docker-compose.yml` file with the following content:
+
+```yaml
+services:
+    httpsmallcacheserver:
+        image:  ghcr.io/arvanus/httpsmallcacheserver
+        volumes:
+        - ./cache:/app/cache
+        ports:
+        - "5000:5000"
+```
+
+Then start the service with:
+
+```bash
+docker-compose up -d
+```
+
+The application will be available at `http://localhost:5000`.
+
+
 ## Usage
 You can use any HTTP client to send requests to the server. For example, using `curl`:
 ```bash
