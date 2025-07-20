@@ -2,13 +2,24 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Net;
 using System.Text.Json;
+using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.Services.AddHttpClient("default", client =>
+{
+    // Optional: add headers, timeouts, etc.
+}).ConfigurePrimaryHttpMessageHandler(() =>
+    new HttpClientHandler
+    {
+        AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli
+    });
 builder.Services.AddHttpClient();
 var app = builder.Build();
 string CachePath = Environment.GetEnvironmentVariable("CACHE_PATH") 
     ?? Path.Combine(app.Environment.WebRootPath ?? "wwwroot", "cache");
 Directory.CreateDirectory(CachePath);
+
+
 
 // Endpoint GET - Proxy com cache para requisições GET
 app.MapGet("/{**url}", async (string url, IHttpClientFactory clientFactory, HttpContext context) =>
@@ -60,11 +71,22 @@ app.MapPost("/{**url}", async (HttpRequest req, string url, IHttpClientFactory c
     }
     
     ms.Position = 0;
-    var client = clientFactory.CreateClient();
-    var content = new StreamContent(ms);
+    var client = clientFactory.CreateClient("default"); //Precisei fazer assim pois a Mistral usa o encode Brotli e o HttpClientHandler padrão não suporta isso.
     
+    var content = new StreamContent(ms);
+
     foreach (var header in req.Headers)
-        content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+    {
+        //if key is host or Accept-encoding skip
+        if (header.Key.Equals("host", StringComparison.OrdinalIgnoreCase)
+            //|| header.Key.Equals("Accept-encoding", StringComparison.OrdinalIgnoreCase) //Br encode ins't supported by default HttpClientHandler
+            )
+        {
+            continue;
+        }
+        content.Headers.TryAddWithoutValidation(header.Key.ToString(), header.Value.ToString());
+        client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value.ToString());
+    }
     
     var response = await HttpHelper.ExecuteWithRetry(client, async (c) => await c.PostAsync(targetUri, content));
     var responseData = await response.Content.ReadAsByteArrayAsync();
@@ -77,10 +99,14 @@ app.MapPost("/{**url}", async (HttpRequest req, string url, IHttpClientFactory c
     
     string requestFile = Path.Combine(CachePath, hash + ".request");
     await File.WriteAllBytesAsync(requestFile, ms.ToArray());
-    
+
     if (response.IsSuccessStatusCode)
     {
         await CacheHelper.SaveToCache(hash, url, req.Headers, response, responseData, CachePath);
+    }
+    else
+    {
+        Console.WriteLine($"POST request to {url} failed with status code {response.StatusCode}");
     }
     
     Results.StatusCode((int)response.StatusCode);
@@ -275,7 +301,7 @@ public static class HttpHelper
     /// <param name="maxRetries">Número máximo de tentativas (padrão: 3)</param>
     /// <returns>Resposta HTTP da requisição bem-sucedida</returns>
     public static async Task<HttpResponseMessage> ExecuteWithRetry(
-        HttpClient client, 
+        HttpClient client,
         Func<HttpClient, Task<HttpResponseMessage>> requestFunc,
         int maxRetries = 3)
     {
@@ -284,20 +310,20 @@ public static class HttpHelper
             try
             {
                 var response = await requestFunc(client);
-                
+
                 // Se não é rate limit, retorna a resposta (sucesso ou erro)
                 if (response.StatusCode != HttpStatusCode.TooManyRequests)
                 {
                     return response;
                 }
-                
+
                 // Se é rate limit e ainda há tentativas restantes
                 if (attempt < maxRetries)
                 {
                     // Verifica se existe header Retry-After
                     var retryAfter = response.Headers.RetryAfter;
                     int waitSeconds;
-                    
+
                     if (retryAfter?.Delta.HasValue == true)
                     {
                         // Usa o tempo especificado no header Retry-After
@@ -313,13 +339,13 @@ public static class HttpHelper
                         // Backoff exponencial: 2^attempt segundos (2, 4, 8...)
                         waitSeconds = (int)Math.Pow(2, attempt + 1);
                     }
-                    
+
                     // Garante um mínimo de 1 segundo e máximo de 60 segundos
                     waitSeconds = Math.Max(1, Math.Min(waitSeconds, 60));
-                    
+
                     Console.WriteLine($"Rate limit detected. Waiting {waitSeconds} seconds before retry {attempt + 1}/{maxRetries}...");
                     await Task.Delay(TimeSpan.FromSeconds(waitSeconds));
-                    
+
                     response.Dispose(); // Libera recursos da resposta com erro
                 }
                 else
@@ -333,7 +359,7 @@ public static class HttpHelper
             {
                 // Em caso de exceção (timeout, network error, etc.), tenta novamente
                 Console.WriteLine($"Request failed on attempt {attempt + 1}: {ex.Message}");
-                
+
                 if (attempt < maxRetries)
                 {
                     int waitSeconds = (int)Math.Pow(2, attempt + 1);
@@ -342,7 +368,7 @@ public static class HttpHelper
                 }
             }
         }
-        
+
         // Se chegou aqui, todas as tentativas falharam com exceção
         throw new HttpRequestException($"Request failed after {maxRetries + 1} attempts");
     }
