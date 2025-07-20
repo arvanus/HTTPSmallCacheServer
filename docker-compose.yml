@@ -5,6 +5,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    volumes:
+      - ./cache:/app/cache
     ports:
       - "5141:5000"
     environment:

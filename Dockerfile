@@ -16,6 +16,7 @@ RUN dotnet publish "HTTPSmallCacheServer.csproj" -c Release -o /app/publish
 FROM base AS final
 WORKDIR /app
 ENV PORT=5000
+ENV CACHE_PATH=/app/cache
 COPY --from=publish /app/publish .
 ENTRYPOINT dotnet HTTPSmallCacheServer.dll --urls "http://*:$PORT"
 EXPOSE $PORT
