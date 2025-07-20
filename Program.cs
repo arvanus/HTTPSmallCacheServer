@@ -11,6 +11,7 @@ builder.Services.AddHttpClient("default", client =>
 }).ConfigurePrimaryHttpMessageHandler(() =>
     new HttpClientHandler
     {
+        //Por padrão o HttpClientHandler não suporta Brotli, então é necessário configurar manualmente.
         AutomaticDecompression = DecompressionMethods.GZip | DecompressionMethods.Deflate | DecompressionMethods.Brotli
     });
 builder.Services.AddHttpClient();
