@@ -38,8 +38,19 @@ app.MapGet("/{**url}", async (string url, IHttpClientFactory clientFactory, Http
         return Results.File(cachedData, metadata.ContentType ?? "application/octet-stream");
     }
     
-    var client = clientFactory.CreateClient();
-    var response = await HttpHelper.ExecuteWithRetry(client, async (c) => await c.GetAsync(targetUri));
+    var client = clientFactory.CreateClient("default");
+    var response = await HttpHelper.ExecuteWithRetry(client, async (c) =>
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, targetUri);
+        foreach (var header in context.Request.Headers)
+        {
+            // Não encaminha o Host (senão sobrescreve o host do destino)
+            if (header.Key.Equals("host", StringComparison.OrdinalIgnoreCase))
+                continue;
+            request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
+        }
+        return await c.SendAsync(request);
+    });
     var data = await response.Content.ReadAsByteArrayAsync();
     
     await CacheHelper.SaveToCache(hash, url, context.Request.Headers, response, data, CachePath);
@@ -61,7 +72,7 @@ app.MapPost("/{**url}", async (HttpRequest req, string url, IHttpClientFactory c
     
     var contentType = req.ContentType ?? "";
    
-    string hash = await CacheHelper.GenerateHash(url, ms);
+    string hash = await CacheHelper.GenerateHash(url, ms, "POST");
     
     var cachedResult = await CacheHelper.LoadFromCache(hash, CachePath);
     if (cachedResult.HasValue)
@@ -73,23 +84,26 @@ app.MapPost("/{**url}", async (HttpRequest req, string url, IHttpClientFactory c
     
     ms.Position = 0;
     var client = clientFactory.CreateClient("default"); //Precisei fazer assim pois a Mistral usa o encode Brotli e o HttpClientHandler padrão não suporta isso.
-    
-    var content = new StreamContent(ms);
 
-    foreach (var header in req.Headers)
+    var response = await HttpHelper.ExecuteWithRetry(client, async (c) =>
     {
-        //if key is host or Accept-encoding skip
-        if (header.Key.Equals("host", StringComparison.OrdinalIgnoreCase)
-            //|| header.Key.Equals("Accept-encoding", StringComparison.OrdinalIgnoreCase) //Br encode ins't supported by default HttpClientHandler
-            )
+        ms.Position = 0;
+        var request = new HttpRequestMessage(HttpMethod.Post, targetUri)
         {
-            continue;
+            Content = new StreamContent(ms)
+        };
+        foreach (var header in req.Headers)
+        {
+            // Não encaminha o Host (senão sobrescreve o host do destino)
+            if (header.Key.Equals("host", StringComparison.OrdinalIgnoreCase))
+                continue;
+            // Headers de request vão em request.Headers; os de conteúdo (Content-Type,
+            // Content-Length...) são rejeitados lá e caem no fallback content.Headers.
+            if (!request.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray()))
+                request.Content.Headers.TryAddWithoutValidation(header.Key, header.Value.ToArray());
         }
-        content.Headers.TryAddWithoutValidation(header.Key.ToString(), header.Value.ToString());
-        client.DefaultRequestHeaders.TryAddWithoutValidation(header.Key, header.Value.ToString());
-    }
-    
-    var response = await HttpHelper.ExecuteWithRetry(client, async (c) => await c.PostAsync(targetUri, content));
+        return await c.SendAsync(request);
+    });
     var responseData = await response.Content.ReadAsByteArrayAsync();
     
     if (contentType.Contains("text") || contentType.Contains("json") || contentType.Contains("x-www-form-urlencoded"))
@@ -146,12 +160,19 @@ public static class CacheHelper
     /// <param name="url">A URL da requisição</param>
     /// <param name="body">O corpo da requisição (opcional, usado principalmente em POST)</param>
     /// <returns>String hexadecimal representando o hash SHA256</returns>
-    public static async Task<string> GenerateHash(string url, Stream? body = null)
+    public static async Task<string> GenerateHash(string url, Stream? body = null, string method = "GET")
     {
         using var sha = SHA256.Create();
-        
-        // Adiciona a URL ao hash
-        sha.TransformBlock(Encoding.UTF8.GetBytes(url), 0, url.Length, null, 0);
+
+        // Adiciona o método (GET/POST) para evitar colisão entre um GET e um POST
+        // de corpo vazio na mesma URL (que gerariam o mesmo hash).
+        var methodBytes = Encoding.UTF8.GetBytes(method + " ");
+        sha.TransformBlock(methodBytes, 0, methodBytes.Length, null, 0);
+
+        // Adiciona a URL ao hash (usa a contagem de bytes, não de caracteres,
+        // para funcionar com URLs contendo caracteres multi-byte).
+        var urlBytes = Encoding.UTF8.GetBytes(url);
+        sha.TransformBlock(urlBytes, 0, urlBytes.Length, null, 0);
         
         // Se há corpo da requisição, adiciona ao hash
         if (body != null)
